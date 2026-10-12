@@ -43,6 +43,7 @@ import {
 import { postCheckSpam } from 'twikoo-func/utils/spam'
 import { sendNotice, emailTest } from 'twikoo-func/utils/notify'
 import { uploadImage } from 'twikoo-func/utils/image'
+import { checkSpamWithAI } from './utils/ai-spam-checker.js'
 import logger from 'twikoo-func/utils/logger'
 import twikooFuncPkg from 'twikoo-func/package.json'
 
@@ -875,7 +876,7 @@ async function commentSubmit (event, request) {
     await Promise.race([
       (async () => {
         try {
-          await postSubmit(comment)
+          await postSubmit(comment, env)
         } catch (e) {
           logger.error('POST_SUBMIT 遇到错误')
           logger.error('请求参数：', comment)
@@ -910,9 +911,21 @@ async function getParentComment (currentComment) {
 }
 
 // 异步垃圾检测、发送评论通知
-async function postSubmit (comment) {
+async function postSubmit (comment, env) {
   // 垃圾检测
-  const isSpam = await postCheckSpam(comment, config) ?? false
+  let isSpam = await postCheckSpam(comment, config) ?? false
+  
+  // OpenAI 兼容 API 垃圾评论过滤（独立于现有检测机制）
+  try {
+    const aiIsSpam = await checkSpamWithAI(comment, env)
+    if (aiIsSpam) {
+      logger.log('[AI Spam Check] AI 判定为垃圾评论，标记为 spam')
+      isSpam = true
+    }
+  } catch (e) {
+    logger.error('[AI Spam Check] AI 审核执行异常:', e.message)
+  }
+  
   await saveSpamCheckResult(comment, isSpam)
   // 发送通知
   await sendNotice(comment, config, getParentComment)
