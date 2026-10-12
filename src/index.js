@@ -49,28 +49,17 @@ import twikooFuncPkg from 'twikoo-func/package.json'
 // 常量 / constants
 import constants from 'twikoo-func/utils/constants'
 
-// ============ OpenAI AI 垃圾评论过滤 ============
+// ============ OpenAI AI 垃圾评论过滤（前置审核） ============
+// 在评论保存到数据库之前完成 AI 审核，确保 isSpam 初始值正确
+// 所有代码包裹在 try-catch 中，绝不抛出异常破坏 Twikoo 主流程
+
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1/'
 const DEFAULT_SPAM_CHECK_MODEL = 'gpt-4o-mini'
 
 /**
- * 使用 OpenAI 兼容 API 检测评论是否为垃圾评论
- * @param {Object} commentData - 评论数据，包含 nick, mail, ip, comment 等字段
- * @param {Object} env - Cloudflare Workers 环境变量
- * @returns {Promise<boolean>} true 表示判定为垃圾评论，false 表示正常评论
+ * 构建审核系统提示词（仅一次，常量定义）
  */
-async function checkSpamWithAI (commentData, env) {
-  const openaiBaseUrl = (env.OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '')
-  const openaiApiKey = env.OPENAI_API_KEY || ''
-  const model = env.SPAM_CHECK_MODEL || DEFAULT_SPAM_CHECK_MODEL
-
-  if (!openaiApiKey) {
-    logger.warn('[AI Spam Check] OPENAI_API_KEY 未配置，跳过 AI 审核')
-    return false
-  }
-
-  // 构建审核提示词
-  const systemPrompt = `You are a professional spam detection assistant. Analyze the following comment and determine if it is SPAM or NOT SPAM.
+const AI_SPAM_SYSTEM_PROMPT = `You are a professional spam detection assistant. Analyze the following comment and determine if it is SPAM or NOT SPAM.
 
 Rules for judging SPAM:
 1. Advertising / promotional content (products, services, websites, courses, etc.)
@@ -89,8 +78,67 @@ Rules for judging as NOT SPAM (normal human comments):
 
 Output format: Reply with ONLY one word - "SPAM" or "NOT SPAM". Nothing else.`
 
-  const userPrompt = buildCommentPrompt(commentData)
+/**
+ * 构建评论内容提示词
+ * @param {Object} data - 评论数据
+ * @returns {string}
+ */
+function buildAiCommentPrompt (data) {
+  const lines = []
+  lines.push('Please analyze the following comment:')
+  lines.push('')
+  if (data.nick)      lines.push(`Nickname: ${data.nick}`)
+  if (data.mail)      lines.push(`Email: ${data.mail}`)
+  if (data.ip)        lines.push(`IP Address: ${data.ip}`)
+  if (data.link)      lines.push(`Website/Link: ${data.link}`)
+  if (data.comment)   lines.push(`Comment Content: ${data.comment}`)
+  if (data.url)       lines.push(`Page URL: ${data.url}`)
+  if (data.href)      lines.push(`Page Title: ${data.href}`)
+  if (data.pid || data.rid)
+    lines.push(`Parent ID: ${data.pid || data.rid}`)
+  if (data.ipRegion)
+    lines.push(`IP Region: ${data.ipRegion}`)
+  return lines.join('\n')
+}
 
+/**
+ * 调用 OpenAI 兼容 API 进行垃圾评论审核（前置审核，在 save 之前调用）
+ * 严格保证：无论任何情况都不抛出 Error，只返回 { is_spam: boolean }
+ * @param {Object} commentData - 评论原始数据
+ * @param {Object} env - Cloudflare Workers 环境变量
+ * @returns {Promise<{is_spam: boolean}>}
+ */
+async function aiPreCheckSpam (commentData, env) {
+  // 1. 读取配置
+  let openaiBaseUrl
+  let openaiApiKey
+  let model
+
+  try {
+    openaiBaseUrl = (env.OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '')
+    openaiApiKey  = env.OPENAI_API_KEY  || ''
+    model         = env.SPAM_CHECK_MODEL || DEFAULT_SPAM_CHECK_MODEL
+  } catch (e) {
+    logger.warn('[AI Spam Check] 读取环境变量失败:', e.message)
+    return { is_spam: false }
+  }
+
+  // 2. Key 缺失则跳过
+  if (!openaiApiKey || openaiApiKey === '') {
+    logger.warn('[AI Spam Check] OPENAI_API_KEY 未配置，跳过 AI 审核')
+    return { is_spam: false }
+  }
+
+  // 3. 构建 Prompt
+  let userPrompt
+  try {
+    userPrompt = buildAiCommentPrompt(commentData)
+  } catch (e) {
+    logger.warn('[AI Spam Check] 构建提示词失败:', e.message)
+    return { is_spam: false }
+  }
+
+  // 4. 发送 API 请求（完整 try-catch 保护）
   try {
     const response = await fetch(`${openaiBaseUrl}/chat/completions`, {
       method: 'POST',
@@ -101,76 +149,47 @@ Output format: Reply with ONLY one word - "SPAM" or "NOT SPAM". Nothing else.`
       body: JSON.stringify({
         model: model,
         messages: [
-          { role: 'system', content: systemPrompt },
+          { role: 'system', content: AI_SPAM_SYSTEM_PROMPT },
           { role: 'user', content: userPrompt }
         ],
         max_tokens: 16,
         temperature: 0
-      })
+      }),
+      signal: AbortSignal.timeout(10000) // 10 秒超时保护
     })
 
+    // 5. 解析响应
     if (!response.ok) {
-      const errorText = await response.text()
-      logger.error('[AI Spam Check] API 请求失败:', response.status, errorText)
-      // API 请求失败时默认不视为 spam，避免误伤正常评论
-      return false
+      let errorDetail
+      try { errorDetail = await response.text() } catch (_) { errorDetail = '(无法读取响应体)' }
+      logger.error('[AI Spam Check] API 请求失败 HTTP', response.status, '-', errorDetail)
+      return { is_spam: false }
     }
 
-    const json = await response.json()
+    let json
+    try {
+      json = await response.json()
+    } catch (e) {
+      logger.error('[AI Spam Check] 解析 JSON 响应失败:', e.message)
+      return { is_spam: false }
+    }
 
-    if (json.choices && json.choices.length > 0) {
-      const content = json.choices[0].message.content?.trim()
+    // 6. 判断结果
+    if (json?.choices?.length > 0) {
+      const content = String(json.choices[0].message?.content ?? '').trim()
       const isSpam = content.toUpperCase().includes('SPAM') && !content.toUpperCase().includes('NOT SPAM')
       logger.log(`[AI Spam Check] 评论判定: ${isSpam ? 'SPAM' : '正常'} (回复: "${content}")`)
-      return isSpam
+      return { is_spam: isSpam }
     }
 
     logger.warn('[AI Spam Check] API 返回无有效 choices')
-    return false
-  } catch (error) {
-    logger.error('[AI Spam Check] 请求异常:', error.message)
-    // 网络异常时默认不视为 spam
-    return false
-  }
-}
+    return { is_spam: false }
 
-/**
- * 构建评论内容的提示词文本
- */
-function buildCommentPrompt (data) {
-  const lines = []
-  lines.push('Please analyze the following comment:')
-  lines.push('')
-
-  if (data.nick) {
-    lines.push(`Nickname: ${data.nick}`)
+  } catch (err) {
+    // 7. 网络异常 / 超时 / 任何未预期错误 —— 统一记录日志并放行
+    logger.error('[AI Spam Check] 请求异常，已安全降级放行:', err?.message ?? String(err))
+    return { is_spam: false }
   }
-  if (data.mail) {
-    lines.push(`Email: ${data.mail}`)
-  }
-  if (data.ip) {
-    lines.push(`IP Address: ${data.ip}`)
-  }
-  if (data.link) {
-    lines.push(`Website/Link: ${data.link}`)
-  }
-  if (data.comment) {
-    lines.push(`Comment Content: ${data.comment}`)
-  }
-  if (data.url) {
-    lines.push(`Page URL: ${data.url}`)
-  }
-  if (data.href) {
-    lines.push(`Page Title: ${data.href}`)
-  }
-  if (data.pid || data.rid) {
-    lines.push(`Parent ID: ${data.pid || data.rid}`)
-  }
-  if (data.ipRegion) {
-    lines.push(`IP Region: ${data.ipRegion}`)
-  }
-
-  return lines.join('\n')
 }
 
 
@@ -989,6 +1008,24 @@ async function commentSubmit (event, request) {
   await checkCaptcha(event, request)
   // 预检测、转换
   const data = await parse(event, request)
+
+  // ========== OpenAI AI 垃圾评论前置审核（在 save 之前） ==========
+  // 在写入数据库前完成 AI 审核，确保 comment.isSpam 初始值正确
+  // 此函数有完整的 try-catch 保护，绝不抛出异常破坏 Twikoo 主流程
+  try {
+    const aiResult = await aiPreCheckSpam(data, env)
+    if (aiResult?.is_spam === true) {
+      logger.log('[AI Spam Check] 前置审核判定为垃圾评论，标记 isSpam=true')
+      data.isSpam = true
+    } else {
+      logger.log('[AI Spam Check] 前置审核通过（正常或未配置）')
+    }
+  } catch (e) {
+    // 双重保护：即使外部调用也记录日志但不中断流程
+    logger.error('[AI Spam Check] 前置审核意外出错，安全降级放行:', e?.message ?? String(e))
+  }
+  // ================================================================
+
   // 保存
   const comment = await save(data)
   res.id = comment.id
@@ -1036,20 +1073,9 @@ async function getParentComment (currentComment) {
 
 // 异步垃圾检测、发送评论通知
 async function postSubmit (comment, env) {
-  // 垃圾检测
-  let isSpam = await postCheckSpam(comment, config) ?? false
-  
-  // OpenAI 兼容 API 垃圾评论过滤（独立于现有检测机制）
-  try {
-    const aiIsSpam = await checkSpamWithAI(comment, env)
-    if (aiIsSpam) {
-      logger.log('[AI Spam Check] AI 判定为垃圾评论，标记为 spam')
-      isSpam = true
-    }
-  } catch (e) {
-    logger.error('[AI Spam Check] AI 审核执行异常:', e.message)
-  }
-  
+  // 垃圾检测（仅使用 Twikoo 内置的后置检测，AI 审核已移至 save 之前）
+  const isSpam = await postCheckSpam(comment, config) ?? false
+
   await saveSpamCheckResult(comment, isSpam)
   // 发送通知
   await sendNotice(comment, config, getParentComment)
