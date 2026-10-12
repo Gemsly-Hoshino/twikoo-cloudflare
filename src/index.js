@@ -543,7 +543,7 @@ export default {
           res = await commentLike(event)
           break
         case 'COMMENT_SUBMIT':
-          res = await commentSubmit(event, request)
+          res = await commentSubmit(event, request, env)
           break
         case 'COUNTER_GET':
           res = await counterGet(event)
@@ -998,7 +998,7 @@ async function like (id, uid) {
  * @param {String} event.pid 回复的 ID
  * @param {String} event.rid 评论楼 ID
  */
-async function commentSubmit (event, request) {
+async function commentSubmit (event, request, env) {
   const res = {}
   // 参数校验
   validate(event, ['url', 'ua', 'comment'])
