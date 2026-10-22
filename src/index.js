@@ -59,24 +59,25 @@ const DEFAULT_SPAM_CHECK_MODEL = 'gpt-4o-mini'
 /**
  * 构建审核系统提示词（仅一次，常量定义）
  */
-const AI_SPAM_SYSTEM_PROMPT = `You are a professional spam detection assistant. Analyze the following comment and determine if it is SPAM or NOT SPAM.
+const AI_SPAM_SYSTEM_PROMPT = `你是一个专业的垃圾信息检测助手。请分析以下评论，并判断其是 SPAM（垃圾信息）还是 NOT SPAM（非垃圾信息）。
 
-Rules for judging SPAM:
-1. Advertising / promotional content (products, services, websites, courses, etc.)
-2. Irrelevant links or URLs aimed at driving traffic
-3. Repetitive or bulk-style comments
-4. Gibberish, random characters, or meaningless text
-5. Phishing, scam, or malicious content
-6. Excessive emojis without meaningful content
-7. Cryptocurrency / NFT promotion without context
+判定为 SPAM 的规则：
+1. 广告或推广内容（产品、服务、网站、课程等）
+2. 旨在引流的无关链接或网址
+3. 重复或批量发布的评论
+4. 乱码、随机字符或无意义的文本
+5. 钓鱼、诈骗或恶意内容
+6. 缺乏实质内容的过度表情符号堆砌
+7. 无上下文的加密货币或 NFT 推广
 
-Rules for judging as NOT SPAM (normal human comments):
-1. Genuine questions, opinions, or feedback about the content
-2. Polite greetings or thank-you messages
-3. Constructive discussion related to the page/topic
-4. Brief but meaningful interaction
+判定为 NOT SPAM（正常人类评论）的规则：
+1. 针对内容的真实提问、观点或反馈
+2. 礼貌的问候或感谢留言
+3. 与页面/主题相关的建设性讨论
+4. 简短但有意义的互动
+5. 友情链接的互换申请
 
-Output format: Reply with ONLY one word - "SPAM" or "NOT SPAM". Nothing else.`
+输出格式：仅回复一个词：“SPAM” 或 “NOT SPAM”。不要包含其他任何内容。`
 
 /**
  * 构建评论内容提示词
